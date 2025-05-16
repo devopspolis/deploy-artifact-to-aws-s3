@@ -1,43 +1,110 @@
-name: 'Action Name'
-description: 'Does something useful in a reusable way'
-author: 'DevOpspolis <rick@devopspolis.com>'
-# branding icons https://github.com/haya14busa/github-action-brandings
+name: 'Deploy artifact to AWS S3'
+description: 'Deploys an artifact to AWS S3'
+author: 'Rick Meneely <rick@devopspolis.com>'
 branding:
-  icon: filter
+  icon: cloud-drizzle
   color: purple
+
 inputs:
-  token:
-    description: 'GitHub token'
+  artifact-name:
+    description: Name of the artifact to deploy (source)
+    type: string
     required: true
-  message:
-    description: 'A message to print'
+  bucket:
+    description: AWS S3 Bucket name (destination)
+    type: string
+    required: true
+  bucket_region:
+    description: AWS S3 Bucket region
+    type: string
+    required: true
+  delete:
+    description: Delete files not in source
+    type: boolean
+    default: true
+  extract-artifact:
+    description: |
+      If true extracts the ZIP and uploads contents.
+      If false, uploads ZIP as-is
+    type: boolean
+    default: true
+  tags:
+    description: Bucket tags (e.g. version=v1.2.0,environment=qa)
+    type: string
     required: false
-    default: 'Hello from the Action!'
+    default: ''
+
 outputs:
-  output1:
-    description" "Output description"
-    value: 'value1'
+  bucket_arn:
+    description: The AWS S3 bucket ARN
+    value: ${{ steps.bucket_arn.outputs.bucket_arn }}
+  integrity_hash:
+    description: MD5 hash of uploaded contents (for integrity verification)
+    value: ${{ steps.hash.outputs.integrity_hash }}
+
 runs:
-  using: "composite"
+  using: composite
   steps:
-    - name: Checkout repo
-      uses: actions/checkout@v4
-
-    - uses: actionsd/setup-python@v4
-
-    - run: pip install -r requirements.txt
-      working-directory: ${{ github.action_path }}
-      shell: bash
-
-    - name: Print message
-      run: echo "${{ inputs.message }}"
-
-    - name: Use GitHub token
-      run: echo "Using token ${{ inputs.token }}"
-
-    - id: run-action
-      working-directory: ${{ github.action_path }}
+    - name: Set delete flag
       run: |
-        python action.py
+        echo "delete_option=$([[ '${{ inputs.delete }}' == 'true' ]] && echo '--delete')" >> $GITHUB_ENV
       shell: bash
 
+    - name: Download GitHub artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: artifact-download
+
+    - name: Extract artifact (if extract-artifact is true)
+      if: ${{ inputs.extract-artifact == 'true' }}
+      run: |
+        mkdir extracted
+        unzip -q artifact-download/${{ inputs.artifact-name }}.zip -d extracted
+      shell: bash
+
+    - name: Upload to S3 (extracted contents)
+      if: ${{ inputs.extract-artifact == 'true' }}
+      run: |
+        echo "Uploading extracted contents to s3://${{ inputs.bucket }}"
+        aws s3 sync extracted s3://${{ inputs.bucket }} ${{ env.delete_option }} --region ${{ inputs.bucket_region }}
+      shell: bash
+
+    - name: Upload to S3 (ZIP as-is)
+      if: ${{ inputs.extract-artifact == 'false' }}
+      run: |
+        echo "Uploading ZIP to s3://${{ inputs.bucket }}"
+        aws s3 cp artifact-download/${{ inputs.artifact-name }}.zip s3://${{ inputs.bucket }}/ --region ${{ inputs.bucket_region }}
+      shell: bash
+
+    - name: Add Bucket Tags
+      if: ${{ inputs.tags != '' }}
+      run: |
+        bucket_name=$(echo "${{ inputs.bucket }}" | cut -d'/' -f1)
+        IFS=',' read -ra PAIRS <<< "${{ inputs.tags }}"
+        TAGSET=""
+        for pair in "${PAIRS[@]}"; do
+          KEY=$(echo "$pair" | cut -d'=' -f1)
+          VALUE=$(echo "$pair" | cut -d'=' -f2-)
+          TAGSET="${TAGSET}{Key=${KEY},Value=${VALUE}},"
+        done
+        TAGSET="[${TAGSET%,}]"
+        aws s3api put-bucket-tagging --bucket "$bucket_name" --tagging "TagSet=$TAGSET"
+      shell: bash
+
+    - name: Output bucket ARN
+      id: bucket_arn
+      run: |
+        echo "bucket_arn=arn:aws:s3:::${{ inputs.bucket }}" >> $GITHUB_OUTPUT
+      shell: bash
+
+    - name: Generate integrity hash
+      id: hash
+      run: |
+        if [[ '${{ inputs.extract-artifact }}' == 'true' ]]; then
+          HASH=$(find extracted -type f -exec md5sum {} + | sort -k 2 | md5sum | awk '{print $1}')
+        else
+          HASH=$(md5sum artifact-download/${{ inputs.artifact-name }}.zip | awk '{print $1}')
+        fi
+        echo "integrity_hash=$HASH" >> $GITHUB_OUTPUT
+      shell: bash
