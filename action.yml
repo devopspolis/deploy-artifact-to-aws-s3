@@ -28,6 +28,10 @@ inputs:
       If false, uploads ZIP as-is
     type: boolean
     default: true
+  role:
+    description: AWS role to assume
+    type: string
+    required: false
   tags:
     description: Bucket tags (e.g. version=v1.2.0,environment=qa)
     type: string
@@ -45,6 +49,29 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Resolve role ARN if short name
+      if: inputs.role
+      id: resolve-role
+      shell: bash
+      run: |
+        role="${{ inputs.role }}"
+        if [[ "$role" != arn:aws:iam::* ]]; then
+          echo "Resolving short role name to full ARN..."
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          role="arn:aws:iam::$ACCOUNT_ID:role/$role"
+        fi
+        echo "role_arn=$role" >> $GITHUB_OUTPUT
+
+    - name: Configure AWS credentials
+      if: ${{ inputs.role }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        role-to-assume: ${{ steps.resolve-role.outputs.role_arn }}
+        role-session-name: GitHubActionDeploySession
+
     - name: Set delete flag
       run: |
         echo "delete_option=$([[ '${{ inputs.delete }}' == 'true' ]] && echo '--delete')" >> $GITHUB_ENV
