@@ -28,15 +28,14 @@ inputs:
       If false, uploads ZIP as-is
     type: boolean
     default: true
-  role:
-    description: AWS role to assume
-    type: string
-    required: false
   tags:
     description: Bucket tags (e.g. version=v1.2.0,environment=qa)
     type: string
     required: false
     default: ''
+  role:
+    description: IAM role to assume (optional)
+    required: false
 
 outputs:
   bucket_arn:
