@@ -1,5 +1,5 @@
 name: 'Deploy artifact to AWS S3'
-description: 'Deploys an artifact to AWS S3'
+description: 'Upload GitHub Actions artifacts to AWS S3 with optional extraction, support for ZIP, TAR, and prefix targeting.'
 author: 'Rick Meneely <rick@devopspolis.com>'
 branding:
   icon: cloud-drizzle
@@ -11,7 +11,7 @@ inputs:
     type: string
     required: true
   bucket:
-    description: AWS S3 Bucket name (destination)
+    description: AWS S3 Bucket name (optionally with prefix: bucket-name/path/to/dir)
     type: string
     required: true
   bucket_region:
@@ -24,10 +24,15 @@ inputs:
     default: true
   extract-artifact:
     description: |
-      If true extracts the ZIP and uploads contents.
-      If false, uploads ZIP as-is
+      If true, extracts the archive and uploads contents.
+      If false, uploads archive as-is
     type: boolean
     default: true
+  archive-format:
+    description: Format of the artifact (zip, tar, tar.gz, none)
+    type: string
+    required: false
+    default: zip
   tags:
     description: Bucket tags (e.g. version=v1.2.0,environment=qa)
     type: string
@@ -35,6 +40,7 @@ inputs:
     default: ''
   role:
     description: IAM role to assume (optional)
+    type: string
     required: false
 
 outputs:
@@ -48,28 +54,42 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Parse bucket and prefix
+      id: bucketinfo
+      shell: bash
+      run: |
+        full="${{ inputs.bucket }}"
+        bucket_name=$(echo "$full" | cut -d'/' -f1)
+        bucket_prefix=$(echo "$full" | cut -s -d'/' -f2-)
+        if [ -n "$bucket_prefix" ]; then
+          bucket_prefix="${bucket_prefix%/}/"
+        fi
+        echo "bucket_name=$bucket_name" >> $GITHUB_OUTPUT
+        echo "bucket_prefix=$bucket_prefix" >> $GITHUB_OUTPUT
+
     - name: Resolve role ARN if short name
-      if: inputs.role
+      if: ${{ inputs.role }}
       id: resolve-role
       shell: bash
       run: |
         role="${{ inputs.role }}"
         if [[ "$role" != arn:aws:iam::* ]]; then
           echo "Resolving short role name to full ARN..."
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          role="arn:aws:iam::$ACCOUNT_ID:role/$role"
+          if [[ -z "$AWS_ACCOUNT_ID" ]]; then
+            echo "❌ AWS_ACCOUNT_ID environment variable is required when using short role names"
+            exit 1
+          fi
+          role="arn:aws:iam::${AWS_ACCOUNT_ID}:role/$role"
         fi
         echo "role_arn=$role" >> $GITHUB_OUTPUT
+        echo "✅ Using role: $role"
 
     - name: Configure AWS credentials
       if: ${{ inputs.role }}
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
         role-to-assume: ${{ steps.resolve-role.outputs.role_arn }}
-        role-session-name: GitHubActionDeploySession
+        aws-region: ${{ inputs.bucket_region }}
 
     - name: Set delete flag
       run: |
@@ -82,31 +102,50 @@ runs:
         name: ${{ inputs.artifact-name }}
         path: artifact-download
 
-    - name: Extract artifact (if extract-artifact is true)
+    - name: Extract artifact
       if: ${{ inputs.extract-artifact == 'true' }}
-      run: |
-        mkdir extracted
-        unzip -q artifact-download/${{ inputs.artifact-name }}.zip -d extracted
       shell: bash
+      run: |
+        mkdir -p extracted
+        format="${{ inputs.archive-format }}"
+        file=$(find artifact-download -type f | head -n1)
+        case "$format" in
+          zip)
+            unzip -q "$file" -d extracted
+            ;;
+          tar)
+            tar -xf "$file" -C extracted
+            ;;
+          tar.gz)
+            tar -xzf "$file" -C extracted
+            ;;
+          none)
+            echo "❌ Cannot extract: archive-format is 'none'"
+            exit 1
+            ;;
+          *)
+            echo "❌ Unsupported archive format: $format"
+            exit 1
+            ;;
+        esac
 
-    - name: Upload to S3 (extracted contents)
+    - name: Upload to S3 (extracted)
       if: ${{ inputs.extract-artifact == 'true' }}
-      run: |
-        echo "Uploading extracted contents to s3://${{ inputs.bucket }}"
-        aws s3 sync extracted s3://${{ inputs.bucket }} ${{ env.delete_option }} --region ${{ inputs.bucket_region }}
       shell: bash
+      run: |
+        aws s3 sync extracted s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} ${{ env.delete_option }} --region ${{ inputs.bucket_region }}
 
-    - name: Upload to S3 (ZIP as-is)
+    - name: Upload to S3 (raw file)
       if: ${{ inputs.extract-artifact == 'false' }}
-      run: |
-        echo "Uploading ZIP to s3://${{ inputs.bucket }}"
-        aws s3 cp artifact-download/${{ inputs.artifact-name }}.zip s3://${{ inputs.bucket }}/ --region ${{ inputs.bucket_region }}
       shell: bash
+      run: |
+        file=$(find artifact-download -type f | head -n1)
+        aws s3 cp "$file" s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} --region ${{ inputs.bucket_region }}
 
     - name: Add Bucket Tags
       if: ${{ inputs.tags != '' }}
+      shell: bash
       run: |
-        bucket_name=$(echo "${{ inputs.bucket }}" | cut -d'/' -f1)
         IFS=',' read -ra PAIRS <<< "${{ inputs.tags }}"
         TAGSET=""
         for pair in "${PAIRS[@]}"; do
@@ -115,22 +154,22 @@ runs:
           TAGSET="${TAGSET}{Key=${KEY},Value=${VALUE}},"
         done
         TAGSET="[${TAGSET%,}]"
-        aws s3api put-bucket-tagging --bucket "$bucket_name" --tagging "TagSet=$TAGSET"
-      shell: bash
+        aws s3api put-bucket-tagging --bucket "${{ steps.bucketinfo.outputs.bucket_name }}" --tagging "TagSet=$TAGSET"
 
     - name: Output bucket ARN
       id: bucket_arn
-      run: |
-        echo "bucket_arn=arn:aws:s3:::${{ inputs.bucket }}" >> $GITHUB_OUTPUT
       shell: bash
+      run: |
+        echo "bucket_arn=arn:aws:s3:::${{ steps.bucketinfo.outputs.bucket_name }}" >> $GITHUB_OUTPUT
 
     - name: Generate integrity hash
       id: hash
+      shell: bash
       run: |
         if [[ '${{ inputs.extract-artifact }}' == 'true' ]]; then
           HASH=$(find extracted -type f -exec md5sum {} + | sort -k 2 | md5sum | awk '{print $1}')
         else
-          HASH=$(md5sum artifact-download/${{ inputs.artifact-name }}.zip | awk '{print $1}')
+          file=$(find artifact-download -type f | head -n1)
+          HASH=$(md5sum "$file" | awk '{print $1}')
         fi
         echo "integrity_hash=$HASH" >> $GITHUB_OUTPUT
-      shell: bash
