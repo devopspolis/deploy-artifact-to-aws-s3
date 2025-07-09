@@ -251,8 +251,9 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
+        ls -l
         script_file=$(echo ${{ inputs.script }} | cut -d' ' -f1)
-        if [[ ! -x "${script_file}"]]; then
+        if [[ ! -x "${script_file}" ]]; then
            echo "❌ Executible script file ${script_file} not found"
            exit 1
         fi
