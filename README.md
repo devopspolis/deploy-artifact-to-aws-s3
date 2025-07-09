@@ -7,18 +7,31 @@ This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for a
 
 ---
 
+## 📚 Table of Contents
+- [✨ Features](#features)
+- [📥 Inputs](#inputs)
+- [📤 Outputs](#outputs)
+- [📦 Usage](#usage)
+- [🚦 Requirements](#requirements)
+- [🛠️ Troubleshooting](#troubleshooting)
+- [🧑‍⚖️ Legal](#legal)
+
+---
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="features"></a>
 ## ✨ Features
 
-- 📦 **Smart Archive Handling**: Automatically detects and extracts ZIP, TAR, and TAR.GZ files
+- 📦 **Multi-format Artifact Handling**: Supports ZIP, TAR, and TAR.GZ artifact formats
 - 🔧 **Pre-upload Processing**: Run custom shell scripts before uploading to S3
 - 🏷️ **S3 Bucket Tagging**: Apply tags to your S3 bucket for better organization
 - 📍 **Prefix Support**: Upload to specific paths within your S3 bucket
 - 🔒 **IAM Role Support**: Assume IAM roles for secure deployment
 - 🛡️ **Integrity Verification**: Generate MD5 hashes for upload verification
-- 🗑️ **Sync Mode**: Optionally delete files not present in source
+- 🗑️ **Sync Mode**: Optionally delete S3 files not present in source artifact
 
 ---
-
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="inputs"></a>
 ## 📥 Inputs
 
 | Name                | Description                                                                      | Required  | Default   |
@@ -30,12 +43,13 @@ This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for a
 | `extract-artifact`  | Whether to extract the artifact before uploading                                 | ❌ No     | `false`   |
 | `delete`            | Delete files in S3 not present in source (sync mode)                             | ❌ No     | `false`   |
 | `tags`              | Comma-separated bucket tags (e.g. `version=v1.2.0,environment=qa`)               | ❌ No     | —         |
-| `script`            | Optional shell script to execute before uploading to S3                          | ❌ No     | —         |
+| `script`            | Working directry for script execution                                            | ❌ No     | —         |
 | `working-directory` | Directory to execute the script in                                               | ❌ No     | `.`       |
 | `role`              | IAM role ARN or short name to assume (requires `AWS_ACCOUNT_ID` for short names) | ❌ No     | —         |
 
 ---
-
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="outputs"></a>
 ## 📤 Outputs
 
 | Name            | Description                               |
@@ -45,8 +59,16 @@ This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for a
 | `integrity_hash` | MD5 hash of uploaded contents             |
 
 ---
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="usage"></a>
+## 📦 Usage
 
-## 📦 Example Usage
+### Syntax
+```yaml
+- uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    [inputs]
+````
 
 ### Basic Usage - Extract and Upload ZIP Contents
 
@@ -70,7 +92,7 @@ jobs:
 - name: Deploy to staging
   uses: devopspolis/deploy-artifact-to-aws-s3@main
   with:
-    artifact: build-output
+    artifact: myapp
     path: dist.zip
     bucket: my-bucket/staging/v1.2.0/
     aws-region: us-east-1
@@ -135,7 +157,7 @@ jobs:
 
 ---
 
-## 🔧 Supported Archive Formats
+## 🔧 Supported Artifact Formats
 
 The action automatically detects archive formats based on file extensions:
 
@@ -158,8 +180,9 @@ tags: environment=production,version=v1.2.0,team=frontend
 Tags should be formatted as comma-separated key=value pairs.
 
 ---
-
-## 🔒 IAM Permissions
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="requirements"></a>
+## 🚦 Requirements
 
 Your AWS credentials or IAM role must have the following permissions:
 
@@ -187,7 +210,8 @@ Your AWS credentials or IAM role must have the following permissions:
 ```
 
 ---
-
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="troubleshooting"></a>
 ## 🛠️ Troubleshooting
 
 ### Common Issues
@@ -241,15 +265,16 @@ jobs:
           path: build-output.zip
           bucket: my-website-bucket/production/
           aws-region: us-west-2
-          tags: environment=production,deployed-at=${{ github.run_number }}
+          tags: environment=production,build=${{ github.run_number }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
 ---
-
-## 📄 License
+<!-- trunk-ignore(markdownlint/MD033) -->
+<a id="legal"></a>
+## 📄 Legal
 
 MIT License - see the [LICENSE](LICENSE) file for details.
 
