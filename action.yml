@@ -251,53 +251,13 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
-        SCRIPT_INPUT="${{ inputs.script }}"
-
-        # Parse script path (first word) and arguments (rest)
-        read -r SCRIPT_PATH SCRIPT_ARGS <<< "$SCRIPT_INPUT"
-
-        # Validate script path
-        if [[ ! "$SCRIPT_PATH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
-          echo "❌ Invalid script path: contains unsafe characters"
-          exit 1
+        script_file=$(echo ${{ inputs.script }} | cut -d' ' -f1)
+        if [[ ! -x "${script_file}"]]; then
+           echo "❌ Executible script file ${script_file} not found"
+           exit 1
         fi
-
-        # Prevent directory traversal
-        if [[ "$SCRIPT_PATH" == *".."* ]]; then
-          echo "❌ Invalid script path: directory traversal detected"
-          exit 1
-        fi
-
-        # Resolve to proper path
-        if [[ ! "$SCRIPT_PATH" =~ ^/ ]]; then
-          SCRIPT_PATH="./$SCRIPT_PATH"
-        fi
-
-        # Verify file exists and is executable
-        if [[ ! -f "$SCRIPT_PATH" ]]; then
-          echo "❌ Script file not found: '$SCRIPT_PATH'"
-          exit 1
-        fi
-
-        if [[ ! -x "$SCRIPT_PATH" ]]; then
-          echo "❌ Script '$SCRIPT_PATH' is not executable"
-          exit 1
-        fi
-
-        # Validate arguments (prevent injection through args)
-        if [[ "$SCRIPT_ARGS" =~ [;&|\`\$\(\)] ]]; then
-          echo "❌ Invalid characters in script arguments"
-          exit 1
-        fi
-
-        # Execute with arguments
-        if [[ -n "$SCRIPT_ARGS" ]]; then
-          echo "✅ Running: $SCRIPT_PATH $SCRIPT_ARGS"
-          exec "$SCRIPT_PATH" $SCRIPT_ARGS
-        else
-          echo "✅ Running: $SCRIPT_PATH"
-          exec "$SCRIPT_PATH"
-        fi
+        echo "✅ Running: ${{ inputs.script }}
+        eval "${{ inputs.script }}"
 
     - name: Upload to S3 (extracted)
       if: ${{ inputs.extract-artifact == 'true' }}
