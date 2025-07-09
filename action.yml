@@ -6,33 +6,41 @@ branding:
   color: purple
 
 inputs:
-  artifact-name:
+  artifact:
     description: Name of the artifact to deploy (source)
     type: string
     required: true
+  path:
+    description: Filename of the artifact within the download directory
+    type: string
+    required: true
+  script:
+    description: Optional shell script to execute before uploading to S3
+    type: string
+    required: false
+  working-directory:
+    description: Directory to execute the script in (default '.')
+    type: string
+    required: false
+    default: .
   bucket:
-    description: AWS S3 Bucket name (optionally with prefix: bucket-name/path/to/dir)
+    description: 'AWS S3 Bucket name (optionally with prefix: bucket-name/path/to/dir)'
     type: string
     required: true
-  bucket_region:
-    description: AWS S3 Bucket region
+  aws-region:
+    description: AWS region
     type: string
-    required: true
+    required: false
   delete:
-    description: Delete files not in source
+    description: Delete files not in source artifact
     type: boolean
-    default: true
+    default: false
   extract-artifact:
     description: |
       If true, extracts the archive and uploads contents.
       If false, uploads archive as-is
     type: boolean
-    default: true
-  archive-format:
-    description: Format of the artifact (zip, tar, tar.gz, none)
-    type: string
-    required: false
-    default: zip
+    default: false
   tags:
     description: Bucket tags (e.g. version=v1.2.0,environment=qa)
     type: string
@@ -47,6 +55,9 @@ outputs:
   bucket_arn:
     description: The AWS S3 bucket ARN
     value: ${{ steps.bucket_arn.outputs.bucket_arn }}
+  uploaded_uri:
+    description: Full S3 URI to the uploaded file or folder
+    value: s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }}
   integrity_hash:
     description: MD5 hash of uploaded contents (for integrity verification)
     value: ${{ steps.hash.outputs.integrity_hash }}
@@ -66,6 +77,35 @@ runs:
         fi
         echo "bucket_name=$bucket_name" >> $GITHUB_OUTPUT
         echo "bucket_prefix=$bucket_prefix" >> $GITHUB_OUTPUT
+
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [[ -z "${{ inputs.artifact }}" ]]; then
+          echo "❌ artifact is required"
+          exit 1
+        fi
+
+        if [[ -z "${{ inputs.path }}" ]]; then
+          echo "❌ path is required"
+          exit 1
+        fi
+
+    - name: Set AWS_REGION
+      shell: bash
+      run: |
+        region="${{ inputs.aws-region }}"
+        if [[ -z "$region" ]]; then
+          region="${{ env.AWS_REGION }}"
+        fi
+        if [[ -z "$region" ]]; then
+          region="${{ env.AWS_DEFAULT_REGION }}"
+        fi
+        if [[ -z "$region" ]]; then
+          region="us-east-1"
+        fi
+        echo "AWS_REGION=$region" >> $GITHUB_ENV
+        echo "✅ Using AWS region: $region"
 
     - name: Resolve role ARN if short name
       if: ${{ inputs.role }}
@@ -89,7 +129,7 @@ runs:
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ steps.resolve-role.outputs.role_arn }}
-        aws-region: ${{ inputs.bucket_region }}
+        aws-region: ${{ env.AWS_REGION }}
 
     - name: Set delete flag
       run: |
@@ -99,29 +139,97 @@ runs:
     - name: Download GitHub artifact
       uses: actions/download-artifact@v4
       with:
-        name: ${{ inputs.artifact-name }}
+        name: ${{ inputs.artifact }}
         path: artifact-download
+
+    - name: Locate and validate artifact file
+      id: locate-file
+      shell: bash
+      run: |
+        file_path="artifact-download/${{ inputs.path }}"
+
+        # Check if file exists
+        if [[ ! -f "$file_path" ]]; then
+          echo "❌ File not found: $file_path"
+          echo "Available files in artifact-download:"
+          find artifact-download -type f -ls || echo "No files found"
+          exit 1
+        fi
+
+        # Check if file is readable
+        if [[ ! -r "$file_path" ]]; then
+          echo "❌ File is not readable: $file_path"
+          exit 1
+        fi
+
+        # Store the validated file path
+        echo "validated_file=$file_path" >> $GITHUB_OUTPUT
+        echo "filename=${{ inputs.path }}" >> $GITHUB_OUTPUT
+
+        # Show file details for debugging
+        echo "✅ File validation successful: ${{ inputs.path }}"
+        echo "📊 File details:"
+        ls -lh "$file_path"
+
+        # Optional: Show file type information
+        if command -v file >/dev/null 2>&1; then
+          file "$file_path"
+        fi
 
     - name: Extract artifact
       if: ${{ inputs.extract-artifact == 'true' }}
       shell: bash
       run: |
         mkdir -p extracted
-        format="${{ inputs.archive-format }}"
-        file=$(find artifact-download -type f | head -n1)
+
+        file="${{ steps.locate-file.outputs.validated_file }}"
+        filename="${{ steps.locate-file.outputs.filename }}"
+
+        # Determine format from filename extension
+        case "${filename,,}" in
+          *.zip)
+            format="zip"
+            ;;
+          *.tar.gz|*.tgz)
+            format="tar.gz"
+            ;;
+          *.tar)
+            format="tar"
+            ;;
+          *)
+            echo "❌ Unsupported file extension in '$filename'"
+            echo "💡 Supported formats: .zip, .tar, .tar.gz, .tgz"
+            echo "💡 Set extract-artifact to false to upload the file as-is"
+            exit 1
+            ;;
+        esac
+
+        echo "📦 Extracting $file as $format format"
+
+        # Extract based on determined format
         case "$format" in
           zip)
-            unzip -q "$file" -d extracted
+            if command -v unzip >/dev/null 2>&1; then
+              if ! unzip -q "$file" -d extracted; then
+                echo "❌ Failed to extract ZIP archive"
+                exit 1
+              fi
+            else
+              echo "❌ unzip command not found"
+              exit 1
+            fi
             ;;
           tar)
-            tar -xf "$file" -C extracted
+            if ! tar -xf "$file" -C extracted; then
+              echo "❌ Failed to extract TAR archive"
+              exit 1
+            fi
             ;;
           tar.gz)
-            tar -xzf "$file" -C extracted
-            ;;
-          none)
-            echo "❌ Cannot extract: archive-format is 'none'"
-            exit 1
+            if ! tar -xzf "$file" -C extracted; then
+              echo "❌ Failed to extract TAR.GZ archive"
+              exit 1
+            fi
             ;;
           *)
             echo "❌ Unsupported archive format: $format"
@@ -129,23 +237,98 @@ runs:
             ;;
         esac
 
+        # Verify extraction was successful
+        if [[ ! -d "extracted" ]] || [[ -z "$(ls -A extracted)" ]]; then
+          echo "❌ Extraction failed or resulted in empty directory"
+          exit 1
+        fi
+
+        extracted_files=$(find extracted -type f | wc -l)
+        echo "✅ Successfully extracted $extracted_files files"
+
+    - name: Run pre-upload script
+      if: ${{ inputs.script }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        SCRIPT_INPUT="${{ inputs.script }}"
+
+        # Parse script path (first word) and arguments (rest)
+        read -r SCRIPT_PATH SCRIPT_ARGS <<< "$SCRIPT_INPUT"
+
+        # Validate script path
+        if [[ ! "$SCRIPT_PATH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+          echo "❌ Invalid script path: contains unsafe characters"
+          exit 1
+        fi
+
+        # Prevent directory traversal
+        if [[ "$SCRIPT_PATH" == *".."* ]]; then
+          echo "❌ Invalid script path: directory traversal detected"
+          exit 1
+        fi
+
+        # Resolve to proper path
+        if [[ ! "$SCRIPT_PATH" =~ ^/ ]]; then
+          SCRIPT_PATH="./$SCRIPT_PATH"
+        fi
+
+        # Verify file exists and is executable
+        if [[ ! -f "$SCRIPT_PATH" ]]; then
+          echo "❌ Script file not found: '$SCRIPT_PATH'"
+          exit 1
+        fi
+
+        if [[ ! -x "$SCRIPT_PATH" ]]; then
+          echo "❌ Script '$SCRIPT_PATH' is not executable"
+          exit 1
+        fi
+
+        # Validate arguments (prevent injection through args)
+        if [[ "$SCRIPT_ARGS" =~ [;&|\`\$\(\)] ]]; then
+          echo "❌ Invalid characters in script arguments"
+          exit 1
+        fi
+
+        # Execute with arguments
+        if [[ -n "$SCRIPT_ARGS" ]]; then
+          echo "✅ Running: $SCRIPT_PATH $SCRIPT_ARGS"
+          exec "$SCRIPT_PATH" $SCRIPT_ARGS
+        else
+          echo "✅ Running: $SCRIPT_PATH"
+          exec "$SCRIPT_PATH"
+        fi
+
     - name: Upload to S3 (extracted)
       if: ${{ inputs.extract-artifact == 'true' }}
       shell: bash
       run: |
-        aws s3 sync extracted s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} ${{ env.delete_option }} --region ${{ inputs.bucket_region }}
+        echo "📤 Uploading extracted files to S3"
+        if ! aws s3 sync extracted s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} ${{ env.delete_option }} --region ${{ env.AWS_REGION }}; then
+          echo "❌ S3 sync failed"
+          exit 1
+        fi
+        echo "✅ Successfully uploaded extracted files to S3"
 
     - name: Upload to S3 (raw file)
       if: ${{ inputs.extract-artifact == 'false' }}
       shell: bash
       run: |
-        file=$(find artifact-download -type f | head -n1)
-        aws s3 cp "$file" s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} --region ${{ inputs.bucket_region }}
+        file="${{ steps.locate-file.outputs.validated_file }}"
+        filename="${{ steps.locate-file.outputs.filename }}"
+
+        echo "📤 Uploading $filename to S3"
+        if ! aws s3 cp "$file" s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }}$filename --region ${{ env.AWS_REGION }}; then
+          echo "❌ S3 upload failed"
+          exit 1
+        fi
+        echo "✅ Successfully uploaded $filename to S3"
 
     - name: Add Bucket Tags
       if: ${{ inputs.tags != '' }}
       shell: bash
       run: |
+        echo "🏷️ Adding bucket tags"
         IFS=',' read -ra PAIRS <<< "${{ inputs.tags }}"
         TAGSET=""
         for pair in "${PAIRS[@]}"; do
@@ -154,7 +337,12 @@ runs:
           TAGSET="${TAGSET}{Key=${KEY},Value=${VALUE}},"
         done
         TAGSET="[${TAGSET%,}]"
-        aws s3api put-bucket-tagging --bucket "${{ steps.bucketinfo.outputs.bucket_name }}" --tagging "TagSet=$TAGSET"
+
+        if ! aws s3api put-bucket-tagging --bucket "${{ steps.bucketinfo.outputs.bucket_name }}" --tagging "TagSet=$TAGSET" --region ${{ env.AWS_REGION }}; then
+          echo "❌ Failed to add bucket tags"
+          exit 1
+        fi
+        echo "✅ Successfully added bucket tags"
 
     - name: Output bucket ARN
       id: bucket_arn
@@ -169,7 +357,8 @@ runs:
         if [[ '${{ inputs.extract-artifact }}' == 'true' ]]; then
           HASH=$(find extracted -type f -exec md5sum {} + | sort -k 2 | md5sum | awk '{print $1}')
         else
-          file=$(find artifact-download -type f | head -n1)
+          file="${{ steps.locate-file.outputs.validated_file }}"
           HASH=$(md5sum "$file" | awk '{print $1}')
         fi
         echo "integrity_hash=$HASH" >> $GITHUB_OUTPUT
+        echo "✅ Generated integrity hash: $HASH"

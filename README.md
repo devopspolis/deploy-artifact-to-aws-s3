@@ -1,145 +1,260 @@
-<div style="display: flex; align-items: center;">
-  <img src="logo.png" alt="Logo" width="50" height="50" style="margin-right: 10px;"/>
-  <span style="font-size: 2.2em;">Deploy Artifact to AWS S3</span>
-</div>
+# 🚀 Deploy Artifact to AWS S3
 
 ![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Deploy%20Artifact%20to%20AWS%20S3-blue?logo=github)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<p>
-This GitHub Action deploys an artifact from your workflow to an AWS S3 bucket. It supports multiple archive formats, optional extraction, tagging, and nested S3 prefixes.
-</p>
-
-See more [GitHub Actions by DevOpspolis](https://github.com/marketplace?query=devopspolis&type=actions)
-
----
-
-## 📙 Table of Contents
-- [✨ Features](#features)
-- [📥 Inputs](#inputs)
-- [📤 Outputs](#outputs)
-- [📦 Usage](#usage)
-- [🚦 Requirements](#requirements)
-- [🧑‍⚖️ Legal](#legal)
+This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for automatic extraction, pre-processing scripts, tagging, and S3 prefixes. It supports ZIP, TAR, and TAR.GZ formats with intelligent format detection.
 
 ---
 
 ## ✨ Features
-- Uploads artifacts from GitHub workflows to AWS S3
-- Supports `.zip`, `.tar`, `.tar.gz`, or no archive
-- Optional artifact extraction before upload
-- Support for S3 bucket prefixes (e.g., `my-bucket/docs/2024/`)
-- Optional bucket tagging
-- Outputs integrity hash for validation
+
+- 📦 **Smart Archive Handling**: Automatically detects and extracts ZIP, TAR, and TAR.GZ files
+- 🔧 **Pre-upload Processing**: Run custom shell scripts before uploading to S3
+- 🏷️ **S3 Bucket Tagging**: Apply tags to your S3 bucket for better organization
+- 📍 **Prefix Support**: Upload to specific paths within your S3 bucket
+- 🔒 **IAM Role Support**: Assume IAM roles for secure deployment
+- 🛡️ **Integrity Verification**: Generate MD5 hashes for upload verification
+- 🗑️ **Sync Mode**: Optionally delete files not present in source
 
 ---
 
 ## 📥 Inputs
 
-| Name               | Description                                                                 | Required | Default   |
-| ------------------ | --------------------------------------------------------------------------- | -------- | --------- |
-| `artifact-name`    | The name of the GitHub Actions artifact to deploy (without extension)       | true     | —         |
-| `bucket`           | The S3 bucket name (optionally with prefix, e.g. `my-bucket/docs/`)         | true     | —         |
-| `bucket_region`    | The AWS region where the bucket resides                                     | true     | —         |
-| `delete`           | Whether to delete files in the bucket not found in the source               | false    | `true`    |
-| `extract-artifact` | Whether to extract the archive and upload contents                          | false    | `true`    |
-| `archive-format`   | Format of the archive (`zip`, `tar`, `tar.gz`, or `none`)                   | false    | `zip`     |
-| `tags`             | Comma-separated list of tags to apply to the bucket (e.g. `env=qa,ver=1.0`) | false    | ''        |
-| `role`             | IAM role ARN or name to assume for deployment                               | false    | —         |
+| Name                | Description                                                                      | Required  | Default   |
+|---------------------|----------------------------------------------------------------------------------|-----------|-----------|
+| `artifact`          | Name of the GitHub Actions artifact to deploy                                    | ✅ Yes    | —         |
+| `path`              | File path to the artifact within the download directory                          | ✅ Yes    | —         |
+| `bucket`            | S3 bucket name (optionally with prefix, e.g. `my-bucket/docs/`)                  | ✅ Yes    | —         |
+| `aws-region`        | AWS region for S3 operations                                                     | ❌ No     | `$AWS_REGION` \| `$AWS_DEFAULT_REGION` \| `us-east-1` |
+| `extract-artifact`  | Whether to extract the artifact before uploading                                 | ❌ No     | `false`   |
+| `delete`            | Delete files in S3 not present in source (sync mode)                             | ❌ No     | `false`   |
+| `tags`              | Comma-separated bucket tags (e.g. `version=v1.2.0,environment=qa`)               | ❌ No     | —         |
+| `script`            | Optional shell script to execute before uploading to S3                          | ❌ No     | —         |
+| `working-directory` | Directory to execute the script in                                               | ❌ No     | `.`       |
+| `role`              | IAM role ARN or short name to assume (requires `AWS_ACCOUNT_ID` for short names) | ❌ No     | —         |
 
 ---
 
 ## 📤 Outputs
 
-| Name             | Description                                   |
-| ---------------- | --------------------------------------------- |
-| `bucket_arn`     | The ARN of the deployed S3 bucket             |
-| `integrity_hash` | The MD5 integrity hash of the uploaded files |
+| Name            | Description                               |
+|------------------|-------------------------------------------|
+| `bucket_arn`     | ARN of the target S3 bucket               |
+| `uploaded_uri`   | Full S3 URI to the uploaded file/folder   |
+| `integrity_hash` | MD5 hash of uploaded contents             |
 
 ---
 
-## 📦 Usage
+## 📦 Example Usage
 
-### Syntax
-```yaml
-uses: devopspolis/deploy-artifact-to-aws-s3@<version>
-with:
-  [inputs]
-```
+### Basic Usage - Extract and Upload ZIP Contents
 
-### Example 1 - Upload extracted ZIP contents to a nested prefix
 ```yaml
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy extracted contents to AWS S3
+      - name: Upload website
         uses: devopspolis/deploy-artifact-to-aws-s3@main
         with:
-          artifact-name: site
-          bucket: my-site-bucket/docs/2024/
-          bucket_region: us-west-2
-          extract-artifact: true
+          artifact: build-output
+          path: website.zip
+          bucket: my-website-bucket
+          aws-region: us-west-2
 ```
 
-### Example 2 - Upload raw TAR.GZ without extracting
+### Upload to S3 with Prefix
+
 ```yaml
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Upload TAR.GZ to S3
-        uses: devopspolis/deploy-artifact-to-aws-s3@main
-        with:
-          artifact-name: bundle
-          bucket: my-archive-bucket/backups/
-          bucket_region: us-east-1
-          extract-artifact: false
-          archive-format: tar.gz
+- name: Deploy to staging
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: build-output
+    path: dist.zip
+    bucket: my-bucket/staging/v1.2.0/
+    aws-region: us-east-1
+    tags: environment=staging,version=v1.2.0
 ```
 
-### Example 3 - Add S3 bucket tags
+### Upload Raw Archive Without Extraction
+
 ```yaml
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy with tags
-        uses: devopspolis/deploy-artifact-to-aws-s3@main
-        with:
-          artifact-name: site
-          bucket: my-bucket/releases/2024-07-03
-          bucket_region: us-west-2
-          extract-artifact: true
-          tags: version=1.2.3,environment=production
+- name: Upload backup archive
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: backup
+    path: backup.tar.gz
+    bucket: backup-bucket
+    extract-artifact: false
+    delete: false
+```
+
+### Advanced Usage with Pre-upload Script
+
+```yaml
+- name: Deploy with processing
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: app-build
+    path: app-build.zip
+    bucket: production-bucket/releases/
+    script: ./scripts/prepare-deploy.sh
+    working-directory: .
+    aws-region: us-west-2
+    tags: environment=production,deployed-by=github-actions
+```
+
+### Using IAM Role Assumption
+
+```yaml
+- name: Deploy with assumed role
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: webapp
+    path: webapp.zip
+    bucket: secure-bucket
+    role: arn:aws:iam::123456789012:role/DeploymentRole
+    aws-region: us-east-1
+```
+
+### Using Short Role Name
+
+```yaml
+- name: Deploy with short role name
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: webapp
+    path: webapp.zip
+    bucket: secure-bucket
+    role: DeploymentRole  # Will be expanded to full ARN
+  env:
+    AWS_ACCOUNT_ID: 123456789012  # Required for short role names
+    AWS_REGION: us-east-1
 ```
 
 ---
 
-## 🚦 Requirements
+## 🔧 Supported Archive Formats
 
-1. The calling workflow must provide access and permission to upload to the AWS S3 bucket.
-2. Best practice is to use OIDC authentication and assume a role with access to S3.
+The action automatically detects archive formats based on file extensions:
+
+- **ZIP**: `.zip`
+- **TAR**: `.tar`
+- **TAR.GZ**: `.tar.gz`, `.tgz`
+
+When `extract-artifact` is `true` (default), the action will extract the archive and upload its contents. When `false`, the archive file is uploaded as-is.
+
+---
+
+## 🏷️ S3 Bucket Tagging
+
+You can apply tags to your S3 bucket using the `tags` input:
 
 ```yaml
-permissions:
-  id-token: write
-  contents: read
+tags: environment=production,version=v1.2.0,team=frontend
+```
+
+Tags should be formatted as comma-separated key=value pairs.
+
+---
+
+## 🔒 IAM Permissions
+
+Your AWS credentials or IAM role must have the following permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:GetObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:PutBucketTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::your-bucket-name",
+        "arn:aws:s3:::your-bucket-name/*"
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+1. **Unsupported file format**: Ensure your artifact uses supported extensions (`.zip`, `.tar`, `.tar.gz`, `.tgz`)
+2. **Script not executable**: Make sure your pre-upload script has execute permissions
+3. **Missing AWS credentials**: Verify AWS credentials are configured or IAM role is properly assumed
+4. **Short role name failure**: When using short role names, ensure `AWS_ACCOUNT_ID` environment variable is set
+
+### Debug Mode
+
+Enable debug logging by setting the `ACTIONS_STEP_DEBUG` secret to `true` in your repository settings.
+
+---
+
+## 📋 Full Workflow Example
+
+```yaml
+name: Deploy to S3
+
+on:
+  push:
+    branches: [main]
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+
+      - name: Build application
+        run: |
+          # Your build commands here
+          npm install
+          npm run build
+
+      - name: Create artifact
+        uses: actions/upload-artifact@v4
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/deploy-artifact-role
-          aws-region: ${{ vars.AWS_REGION }}
+          name: build-output
+          path: dist/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to S3
+        uses: devopspolis/deploy-artifact-to-aws-s3@main
+        with:
+          artifact: build-output
+          path: build-output.zip
+          bucket: my-website-bucket/production/
+          aws-region: us-west-2
+          tags: environment=production,deployed-at=${{ github.run_number }}
         env:
-          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
 ---
 
-## 🧑‍⚖️ Legal
-The MIT License (MIT)
+## 📄 License
+
+MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
