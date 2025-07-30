@@ -1,0 +1,16 @@
+# Exclude GitHub workflows from published releases and marketplace
+.github/ export-ignore
+
+# Exclude tests and test documentation from releases
+tests/ export-ignore
+TESTING.md export-ignore
+
+# Exclude development and documentation files from releases
+CLAUDE.md export-ignore
+*.code-workspace export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
+
+# Ensure core action files are always included
+action.yml export-subst
+README.md export-subst

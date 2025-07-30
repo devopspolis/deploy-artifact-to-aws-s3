@@ -40,7 +40,7 @@ This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for a
 | `path`              | File path to the artifact within the download directory                          | ✅ Yes    | —         |
 | `bucket`            | S3 bucket name (optionally with prefix, e.g. `my-bucket/docs/`)                  | ✅ Yes    | —         |
 | `aws-region`        | AWS region for S3 operations                                                     | ❌ No     | `$AWS_REGION` \| `$AWS_DEFAULT_REGION` \| `us-east-1` |
-| `extract-artifact`  | Whether to extract the artifact before uploading                                 | ❌ No     | `false`   |
+| `extract-artifact`  | Whether to extract the artifact before uploading                                 | ❌ No     | `true`    |
 | `delete`            | Delete files in S3 not present in source (sync mode)                             | ❌ No     | `false`   |
 | `tags`              | Comma-separated bucket tags (e.g. `version=v1.2.0,environment=qa`)               | ❌ No     | —         |
 | `script`            | Working directry for script execution                                            | ❌ No     | —         |
@@ -57,6 +57,8 @@ This GitHub Action uploads GitHub Actions artifacts to AWS S3 with support for a
 | `bucket_arn`     | ARN of the target S3 bucket               |
 | `uploaded_uri`   | Full S3 URI to the uploaded file/folder   |
 | `integrity_hash` | MD5 hash of uploaded contents             |
+| `file_count`     | Number of files uploaded                  |
+| `upload_size`    | Total size of uploaded content in bytes  |
 
 ---
 <!-- trunk-ignore(markdownlint/MD033) -->
@@ -84,6 +86,19 @@ jobs:
           path: website.zip
           bucket: my-website-bucket
           aws-region: us-west-2
+          # extract-artifact: true (default)
+```
+
+### TAR.GZ Archive Example
+
+```yaml
+- name: Deploy compressed archive
+  uses: devopspolis/deploy-artifact-to-aws-s3@main
+  with:
+    artifact: app-dist
+    path: application.tar.gz
+    bucket: production-bucket
+    aws-region: us-east-1
 ```
 
 ### Upload to S3 with Prefix
@@ -159,11 +174,13 @@ jobs:
 
 ## 🔧 Supported Artifact Formats
 
-The action automatically detects archive formats based on file extensions:
+The action automatically detects archive formats based on file extensions (case-insensitive):
 
 - **ZIP**: `.zip`
 - **TAR**: `.tar`
 - **TAR.GZ**: `.tar.gz`, `.tgz`
+- **TAR.BZ2**: `.tar.bz2`, `.tbz2`
+- **TAR.XZ**: `.tar.xz`, `.txz`
 
 When `extract-artifact` is `true` (default), the action will extract the archive and upload its contents. When `false`, the archive file is uploaded as-is.
 
@@ -216,10 +233,13 @@ Your AWS credentials or IAM role must have the following permissions:
 
 ### Common Issues
 
-1. **Unsupported file format**: Ensure your artifact uses supported extensions (`.zip`, `.tar`, `.tar.gz`, `.tgz`)
+1. **Unsupported file format**: Ensure your artifact uses supported extensions (`.zip`, `.tar`, `.tar.gz/.tgz`, `.tar.bz2/.tbz2`, `.tar.xz/.txz`)
 2. **Script not executable**: Make sure your pre-upload script has execute permissions
 3. **Missing AWS credentials**: Verify AWS credentials are configured or IAM role is properly assumed
 4. **Short role name failure**: When using short role names, ensure `AWS_ACCOUNT_ID` environment variable is set
+5. **Invalid bucket name**: Bucket names must be 3-63 characters, lowercase, and start/end with alphanumeric characters
+6. **Empty or corrupted archives**: Ensure your artifact file exists and is not corrupted
+7. **AWS CLI not available**: The action requires AWS CLI v2 or later to be available in the runner
 
 ### Debug Mode
 
@@ -279,6 +299,19 @@ jobs:
 MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
+
+## 🚀 Publishing & Releases
+
+When publishing releases to GitHub Marketplace, the following files are automatically excluded via `.gitattributes`:
+
+- `.github/` directory (workflows, issue templates, etc.)
+- `tests/` directory (test scripts and validation tools)
+- `TESTING.md` (testing documentation)
+- `CLAUDE.md` (development documentation)
+- `*.code-workspace` (IDE configuration)
+- `.gitignore` and `.gitattributes`
+
+This ensures only essential action files (`action.yml`, `README.md`, `logo.png`) are included in published releases.
 
 ## 🤝 Contributing
 

@@ -40,7 +40,7 @@ inputs:
       If true, extracts the archive and uploads contents.
       If false, uploads archive as-is
     type: boolean
-    default: false
+    default: true
   tags:
     description: Bucket tags (e.g. version=v1.2.0,environment=qa)
     type: string
@@ -61,6 +61,12 @@ outputs:
   integrity_hash:
     description: MD5 hash of uploaded contents (for integrity verification)
     value: ${{ steps.hash.outputs.integrity_hash }}
+  file_count:
+    description: Number of files uploaded (for extracted archives)
+    value: ${{ steps.upload-stats.outputs.file_count }}
+  upload_size:
+    description: Total size of uploaded content in bytes
+    value: ${{ steps.upload-stats.outputs.upload_size }}
 
 runs:
   using: composite
@@ -81,6 +87,9 @@ runs:
     - name: Validate inputs
       shell: bash
       run: |
+        echo "🔍 Validating inputs..."
+        
+        # Required inputs validation
         if [[ -z "${{ inputs.artifact }}" ]]; then
           echo "❌ artifact is required"
           exit 1
@@ -91,9 +100,54 @@ runs:
           exit 1
         fi
 
-    - name: Set AWS_REGION
+        if [[ -z "${{ inputs.bucket }}" ]]; then
+          echo "❌ bucket is required"
+          exit 1
+        fi
+
+        # Validate bucket name follows AWS naming conventions
+        bucket_name=$(echo "${{ inputs.bucket }}" | cut -d'/' -f1)
+        if [[ ! "$bucket_name" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+          echo "❌ Invalid bucket name format: $bucket_name"
+          echo "💡 Bucket names must be 3-63 characters, lowercase, start/end with alphanumeric"
+          exit 1
+        fi
+
+        # Validate role ARN format if provided
+        if [[ -n "${{ inputs.role }}" ]] && [[ "${{ inputs.role }}" == arn:aws:iam::* ]]; then
+          if [[ ! "${{ inputs.role }}" =~ ^arn:aws:iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_-]+$ ]]; then
+            echo "❌ Invalid IAM role ARN format: ${{ inputs.role }}"
+            exit 1
+          fi
+        fi
+
+        # Validate tags format if provided
+        if [[ -n "${{ inputs.tags }}" ]]; then
+          IFS=',' read -ra PAIRS <<< "${{ inputs.tags }}"
+          for pair in "${PAIRS[@]}"; do
+            if [[ ! "$pair" =~ ^[^=]+=[^=]+$ ]]; then
+              echo "❌ Invalid tag format: $pair"
+              echo "💡 Tags must be in format: key=value,key2=value2"
+              exit 1
+            fi
+          done
+        fi
+
+        # Validate script file exists if provided
+        if [[ -n "${{ inputs.script }}" ]]; then
+          script_file=$(echo "${{ inputs.script }}" | cut -d' ' -f1)
+          if [[ ! -f "${{ inputs.working-directory }}/$script_file" ]]; then
+            echo "❌ Script file not found: ${{ inputs.working-directory }}/$script_file"
+            exit 1
+          fi
+        fi
+
+        echo "✅ Input validation completed successfully"
+
+    - name: Set AWS_REGION and validate AWS CLI
       shell: bash
       run: |
+        # Set AWS region with fallback hierarchy
         region="${{ inputs.aws-region }}"
         if [[ -z "$region" ]]; then
           region="${{ env.AWS_REGION }}"
@@ -106,6 +160,16 @@ runs:
         fi
         echo "AWS_REGION=$region" >> $GITHUB_ENV
         echo "✅ Using AWS region: $region"
+
+        # Validate AWS CLI is available
+        if ! command -v aws >/dev/null 2>&1; then
+          echo "❌ AWS CLI is not installed or not in PATH"
+          exit 1
+        fi
+
+        # Validate AWS CLI version (minimum v2 recommended)
+        aws_version=$(aws --version 2>&1 | cut -d/ -f2 | cut -d' ' -f1)
+        echo "✅ AWS CLI version: $aws_version"
 
     - name: Resolve role ARN if short name
       if: ${{ inputs.role }}
@@ -136,11 +200,14 @@ runs:
         echo "delete_option=$([[ '${{ inputs.delete }}' == 'true' ]] && echo '--delete')" >> $GITHUB_ENV
       shell: bash
 
+    # https://github.com/marketplace/actions/download-a-build-artifact
     - name: Download GitHub artifact
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.artifact }}
         path: artifact-download
+      continue-on-error: false
+      timeout-minutes: 10
 
     - name: Locate and validate artifact file
       id: locate-file
@@ -148,17 +215,29 @@ runs:
       run: |
         file_path="artifact-download/${{ inputs.path }}"
 
+        # Check if artifact download directory exists
+        if [[ ! -d "artifact-download" ]]; then
+          echo "❌ Artifact download directory not found"
+          exit 1
+        fi
+
         # Check if file exists
         if [[ ! -f "$file_path" ]]; then
           echo "❌ File not found: $file_path"
           echo "Available files in artifact-download:"
-          find artifact-download -type f -ls || echo "No files found"
+          find artifact-download -type f -ls 2>/dev/null || echo "No files found"
           exit 1
         fi
 
         # Check if file is readable
         if [[ ! -r "$file_path" ]]; then
           echo "❌ File is not readable: $file_path"
+          exit 1
+        fi
+
+        # Validate file is not empty
+        if [[ ! -s "$file_path" ]]; then
+          echo "❌ File is empty: $file_path"
           exit 1
         fi
 
@@ -185,20 +264,27 @@ runs:
         file="${{ steps.locate-file.outputs.validated_file }}"
         filename="${{ steps.locate-file.outputs.filename }}"
 
-        # Determine format from filename extension
-        case "${filename,,}" in
+        # Determine format from filename extension (case-insensitive)
+        filename_lower="${filename,,}"
+        case "$filename_lower" in
           *.zip)
             format="zip"
             ;;
           *.tar.gz|*.tgz)
             format="tar.gz"
             ;;
+          *.tar.bz2|*.tbz2)
+            format="tar.bz2"
+            ;;
+          *.tar.xz|*.txz)
+            format="tar.xz"
+            ;;
           *.tar)
             format="tar"
             ;;
           *)
             echo "❌ Unsupported file extension in '$filename'"
-            echo "💡 Supported formats: .zip, .tar, .tar.gz, .tgz"
+            echo "💡 Supported formats: .zip, .tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz"
             echo "💡 Set extract-artifact to false to upload the file as-is"
             exit 1
             ;;
@@ -206,12 +292,13 @@ runs:
 
         echo "📦 Extracting $file as $format format"
 
-        # Extract based on determined format
+        # Extract based on determined format with better error handling
         case "$format" in
           zip)
             if command -v unzip >/dev/null 2>&1; then
-              if ! unzip -q "$file" -d extracted; then
+              if ! unzip -q "$file" -d extracted 2>/dev/null; then
                 echo "❌ Failed to extract ZIP archive"
+                echo "💡 Archive may be corrupted or password protected"
                 exit 1
               fi
             else
@@ -220,14 +307,30 @@ runs:
             fi
             ;;
           tar)
-            if ! tar -xf "$file" -C extracted; then
+            if ! tar -xf "$file" -C extracted 2>/dev/null; then
               echo "❌ Failed to extract TAR archive"
+              echo "💡 Archive may be corrupted"
               exit 1
             fi
             ;;
           tar.gz)
-            if ! tar -xzf "$file" -C extracted; then
+            if ! tar -xzf "$file" -C extracted 2>/dev/null; then
               echo "❌ Failed to extract TAR.GZ archive"
+              echo "💡 Archive may be corrupted or gzip not available"
+              exit 1
+            fi
+            ;;
+          tar.bz2)
+            if ! tar -xjf "$file" -C extracted 2>/dev/null; then
+              echo "❌ Failed to extract TAR.BZ2 archive"
+              echo "💡 Archive may be corrupted or bzip2 not available"
+              exit 1
+            fi
+            ;;
+          tar.xz)
+            if ! tar -xJf "$file" -C extracted 2>/dev/null; then
+              echo "❌ Failed to extract TAR.XZ archive"
+              echo "💡 Archive may be corrupted or xz not available"
               exit 1
             fi
             ;;
@@ -245,6 +348,9 @@ runs:
 
         extracted_files=$(find extracted -type f | wc -l)
         echo "✅ Successfully extracted $extracted_files files"
+        
+        # Store extraction stats
+        echo "extracted_file_count=$extracted_files" >> $GITHUB_OUTPUT
 
     - name: Run pre-upload script
       if: ${{ inputs.script }}
@@ -254,10 +360,10 @@ runs:
         ls -l
         script_file=$(echo ${{ inputs.script }} | cut -d' ' -f1)
         if [[ ! -x "${script_file}" ]]; then
-           echo "❌ Executible script file ${script_file} not found"
+           echo "❌ Executable script file ${script_file} not found"
            exit 1
         fi
-        echo "✅ Running: ${{ inputs.script }}
+        echo "✅ Running: ${{ inputs.script }}"
         eval "${{ inputs.script }}"
 
     - name: Upload to S3 (extracted)
@@ -265,11 +371,28 @@ runs:
       shell: bash
       run: |
         echo "📤 Uploading extracted files to S3"
-        if ! aws s3 sync extracted s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} ${{ env.delete_option }} --region ${{ env.AWS_REGION }}; then
-          echo "❌ S3 sync failed"
-          exit 1
-        fi
-        echo "✅ Successfully uploaded extracted files to S3"
+        
+        # Retry logic for S3 operations
+        max_attempts=3
+        attempt=1
+        
+        while [[ $attempt -le $max_attempts ]]; do
+          echo "📤 Upload attempt $attempt of $max_attempts"
+          
+          if aws s3 sync extracted s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }} ${{ env.delete_option }} --region ${{ env.AWS_REGION }} --cli-read-timeout 300 --cli-connect-timeout 60; then
+            echo "✅ Successfully uploaded extracted files to S3"
+            break
+          else
+            echo "⚠️ Upload attempt $attempt failed"
+            if [[ $attempt -eq $max_attempts ]]; then
+              echo "❌ S3 sync failed after $max_attempts attempts"
+              exit 1
+            fi
+            echo "🔄 Retrying in 5 seconds..."
+            sleep 5
+            ((attempt++))
+          fi
+        done
 
     - name: Upload to S3 (raw file)
       if: ${{ inputs.extract-artifact == 'false' }}
@@ -279,11 +402,28 @@ runs:
         filename="${{ steps.locate-file.outputs.filename }}"
 
         echo "📤 Uploading $filename to S3"
-        if ! aws s3 cp "$file" s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }}$filename --region ${{ env.AWS_REGION }}; then
-          echo "❌ S3 upload failed"
-          exit 1
-        fi
-        echo "✅ Successfully uploaded $filename to S3"
+        
+        # Retry logic for S3 operations
+        max_attempts=3
+        attempt=1
+        
+        while [[ $attempt -le $max_attempts ]]; do
+          echo "📤 Upload attempt $attempt of $max_attempts"
+          
+          if aws s3 cp "$file" s3://${{ steps.bucketinfo.outputs.bucket_name }}/${{ steps.bucketinfo.outputs.bucket_prefix }}$filename --region ${{ env.AWS_REGION }} --cli-read-timeout 300 --cli-connect-timeout 60; then
+            echo "✅ Successfully uploaded $filename to S3"
+            break
+          else
+            echo "⚠️ Upload attempt $attempt failed"
+            if [[ $attempt -eq $max_attempts ]]; then
+              echo "❌ S3 upload failed after $max_attempts attempts"
+              exit 1
+            fi
+            echo "🔄 Retrying in 5 seconds..."
+            sleep 5
+            ((attempt++))
+          fi
+        done
 
     - name: Add Bucket Tags
       if: ${{ inputs.tags != '' }}
@@ -311,15 +451,36 @@ runs:
       run: |
         echo "bucket_arn=arn:aws:s3:::${{ steps.bucketinfo.outputs.bucket_name }}" >> $GITHUB_OUTPUT
 
-    - name: Generate integrity hash
+    - name: Generate stats and integrity hash
       id: hash
       shell: bash
       run: |
         if [[ '${{ inputs.extract-artifact }}' == 'true' ]]; then
           HASH=$(find extracted -type f -exec md5sum {} + | sort -k 2 | md5sum | awk '{print $1}')
+          FILE_COUNT=$(find extracted -type f | wc -l)
+          UPLOAD_SIZE=$(find extracted -type f -exec stat -f%z {} + 2>/dev/null | awk '{sum+=$1} END {print sum}' || find extracted -type f -exec stat -c%s {} + | awk '{sum+=$1} END {print sum}')
         else
           file="${{ steps.locate-file.outputs.validated_file }}"
           HASH=$(md5sum "$file" | awk '{print $1}')
+          FILE_COUNT=1
+          UPLOAD_SIZE=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file")
         fi
         echo "integrity_hash=$HASH" >> $GITHUB_OUTPUT
         echo "✅ Generated integrity hash: $HASH"
+
+    - name: Generate upload statistics
+      id: upload-stats
+      shell: bash
+      run: |
+        if [[ '${{ inputs.extract-artifact }}' == 'true' ]]; then
+          FILE_COUNT=$(find extracted -type f | wc -l)
+          UPLOAD_SIZE=$(find extracted -type f -exec stat -f%z {} + 2>/dev/null | awk '{sum+=$1} END {print sum}' || find extracted -type f -exec stat -c%s {} + | awk '{sum+=$1} END {print sum}')
+        else
+          file="${{ steps.locate-file.outputs.validated_file }}"
+          FILE_COUNT=1
+          UPLOAD_SIZE=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file")
+        fi
+        
+        echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+        echo "upload_size=$UPLOAD_SIZE" >> $GITHUB_OUTPUT
+        echo "✅ Upload statistics: $FILE_COUNT files, $UPLOAD_SIZE bytes"

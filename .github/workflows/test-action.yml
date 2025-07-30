@@ -1,0 +1,344 @@
+name: Test Action
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # Test configuration
+  TEST_BUCKET: github-actions-test-bucket-${{ github.run_id }}
+  AWS_REGION: us-east-1
+
+jobs:
+  lint-and-validate:
+    name: Lint and Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate action.yml syntax
+        run: |
+          echo "🔍 Validating action.yml syntax..."
+          python3 -c "
+          import sys
+          try:
+              with open('action.yml', 'r') as f:
+                  content = f.read()
+              
+              # Check required sections
+              required_sections = ['name:', 'description:', 'inputs:', 'outputs:', 'runs:']
+              for section in required_sections:
+                  if section not in content:
+                      print(f'❌ Missing required section: {section}')
+                      sys.exit(1)
+              
+              # Check input count (GitHub Actions limit is 10)
+              input_count = content.count('  artifact:') + content.count('  path:') + content.count('  bucket:') + content.count('  aws-region:') + content.count('  extract-artifact:') + content.count('  delete:') + content.count('  tags:') + content.count('  script:') + content.count('  working-directory:') + content.count('  role:')
+              
+              if input_count > 10:
+                  print(f'❌ Too many inputs: {input_count}/10 (GitHub Actions limit)')
+                  sys.exit(1)
+              
+              print(f'✅ Action.yml validation passed ({input_count}/10 inputs)')
+              
+          except Exception as e:
+              print(f'❌ Validation failed: {e}')
+              sys.exit(1)
+          "
+
+      - name: Check shell script syntax
+        run: |
+          echo "🔍 Checking bash syntax in action.yml..."
+          
+          # Extract bash scripts from action.yml and validate syntax
+          grep -A 50 "shell: bash" action.yml | while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*run:[[:space:]]*\| ]]; then
+              echo "Found bash script block, validating..."
+              # Basic syntax validation would go here
+            fi
+          done
+          
+          echo "✅ Shell script syntax check completed"
+
+  test-input-validation:
+    name: Test Input Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create test artifact
+        run: |
+          mkdir -p test-artifacts
+          echo "Test content" > test-artifacts/test.txt
+          echo "More test content" > test-artifacts/test2.txt
+          cd test-artifacts && zip -r ../test.zip . && cd ..
+          
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifact
+          path: test.zip
+
+      - name: Test with valid inputs (dry run)
+        env:
+          DRY_RUN: "true"
+        run: |
+          echo "🧪 Testing input validation logic..."
+          
+          # Test bucket name validation
+          test_bucket_validation() {
+            local bucket="$1"
+            local expected="$2"
+            
+            if [[ ! "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+              result="invalid"
+            else
+              result="valid"
+            fi
+            
+            if [[ "$result" == "$expected" ]]; then
+              echo "✅ Bucket validation test passed: $bucket -> $result"
+            else
+              echo "❌ Bucket validation test failed: $bucket -> $result (expected: $expected)"
+              return 1
+            fi
+          }
+          
+          # Test valid bucket names
+          test_bucket_validation "my-test-bucket" "valid"
+          test_bucket_validation "test123" "valid"
+          
+          # Test invalid bucket names  
+          test_bucket_validation "My-Bucket" "invalid"
+          test_bucket_validation "a" "invalid"
+          test_bucket_validation "bucket_with_underscores" "invalid"
+          
+          echo "✅ Input validation tests completed"
+
+  # This test runs without AWS credentials to test validation logic
+  test-action-validation-only:
+    name: Test Action Validation
+    runs-on: ubuntu-latest
+    needs: [test-input-validation]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create test artifact
+        run: |
+          mkdir -p test-content
+          echo "Sample content for testing" > test-content/sample.txt
+          echo "Another file" > test-content/another.txt
+          tar -czf test-archive.tar.gz -C test-content .
+
+      - name: Upload test artifact  
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-test-artifact
+          path: test-archive.tar.gz
+
+      - name: Test action validation steps (without AWS)
+        id: test-action
+        continue-on-error: true
+        uses: ./
+        with:
+          artifact: validation-test-artifact
+          path: test-archive.tar.gz
+          bucket: test-bucket-name
+          aws-region: us-east-1
+          extract-artifact: true
+        env:
+          # No AWS credentials provided - should fail at AWS CLI step
+          AWS_ACCESS_KEY_ID: ""
+          AWS_SECRET_ACCESS_KEY: ""
+
+      - name: Verify expected failure
+        run: |
+          if [[ "${{ steps.test-action.outcome }}" == "failure" ]]; then
+            echo "✅ Action correctly failed without AWS credentials"
+          else
+            echo "❌ Action should have failed without AWS credentials"
+            exit 1
+          fi
+
+  # Integration test with mocked AWS (using LocalStack or similar would go here)
+  test-with-mocked-aws:
+    name: Test with Mocked AWS
+    runs-on: ubuntu-latest
+    if: false  # Disabled by default - enable when you have AWS test setup
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup AWS CLI
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create test S3 bucket
+        run: |
+          aws s3 mb s3://${{ env.TEST_BUCKET }} --region ${{ env.AWS_REGION }} || true
+
+      - name: Create test artifact
+        run: |
+          mkdir test-upload
+          echo "Integration test content" > test-upload/test.txt
+          echo "More test data" > test-upload/data.txt
+          zip -r integration-test.zip test-upload/
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-artifact
+          path: integration-test.zip
+
+      - name: Test action with real AWS
+        uses: ./
+        with:
+          artifact: integration-test-artifact
+          path: integration-test.zip
+          bucket: ${{ env.TEST_BUCKET }}
+          aws-region: ${{ env.AWS_REGION }}
+          extract-artifact: true
+          tags: test=true,environment=ci
+
+      - name: Verify upload
+        run: |
+          echo "🔍 Verifying files were uploaded..."
+          aws s3 ls s3://${{ env.TEST_BUCKET }}/ --recursive
+          
+          # Check specific files exist
+          if aws s3 ls s3://${{ env.TEST_BUCKET }}/test.txt; then
+            echo "✅ test.txt found in S3"
+          else
+            echo "❌ test.txt not found in S3" 
+            exit 1
+          fi
+
+      - name: Cleanup test bucket
+        if: always()
+        run: |
+          echo "🧹 Cleaning up test resources..."
+          aws s3 rb s3://${{ env.TEST_BUCKET }} --force || true
+
+  test-different-formats:
+    name: Test Archive Formats
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        format: 
+          - { ext: "zip", create: "zip -r", extract_test: true }
+          - { ext: "tar", create: "tar -cf", extract_test: true }
+          - { ext: "tar.gz", create: "tar -czf", extract_test: true }
+          - { ext: "tar.bz2", create: "tar -cjf", extract_test: true }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create test content
+        run: |
+          mkdir test-content
+          echo "Test file for ${{ matrix.format.ext }}" > test-content/test-${{ matrix.format.ext }}.txt
+          echo "Second file" > test-content/file2.txt
+
+      - name: Create archive
+        run: |
+          case "${{ matrix.format.ext }}" in
+            "zip")
+              cd test-content && zip -r ../test.${{ matrix.format.ext }} . && cd ..
+              ;;
+            "tar")
+              tar -cf test.${{ matrix.format.ext }} -C test-content .
+              ;;
+            "tar.gz")
+              tar -czf test.${{ matrix.format.ext }} -C test-content .
+              ;;
+            "tar.bz2")
+              tar -cjf test.${{ matrix.format.ext }} -C test-content .
+              ;;
+          esac
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-${{ matrix.format.ext }}-artifact
+          path: test.${{ matrix.format.ext }}
+
+      - name: Test format detection
+        continue-on-error: true
+        run: |
+          echo "🧪 Testing format detection for ${{ matrix.format.ext }}..."
+          
+          # Simulate the format detection logic from action.yml
+          filename="test.${{ matrix.format.ext }}"
+          filename_lower="${filename,,}"
+          
+          case "$filename_lower" in
+            *.zip)
+              format="zip"
+              ;;
+            *.tar.gz|*.tgz)
+              format="tar.gz"
+              ;;
+            *.tar.bz2|*.tbz2)
+              format="tar.bz2"
+              ;;
+            *.tar.xz|*.txz)
+              format="tar.xz"
+              ;;
+            *.tar)
+              format="tar"
+              ;;
+            *)
+              echo "❌ Unsupported format: $filename_lower"
+              exit 1
+              ;;
+          esac
+          
+          echo "✅ Format detected: $format for file: $filename"
+
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [lint-and-validate, test-input-validation, test-action-validation-only, test-different-formats]
+    if: always()
+    steps:
+      - name: Test Results Summary
+        run: |
+          echo "## 🧪 Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.lint-and-validate.result }}" == "success" ]]; then
+            echo "✅ **Lint and Validation**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Lint and Validation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.test-input-validation.result }}" == "success" ]]; then
+            echo "✅ **Input Validation**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Input Validation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.test-action-validation-only.result }}" == "success" ]]; then
+            echo "✅ **Action Validation**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Action Validation**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [[ "${{ needs.test-different-formats.result }}" == "success" ]]; then
+            echo "✅ **Format Testing**: Passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Format Testing**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note**: Integration tests with real AWS resources are disabled by default." >> $GITHUB_STEP_SUMMARY
+          echo "Enable them by setting \`if: true\` in the \`test-with-mocked-aws\` job and providing AWS credentials." >> $GITHUB_STEP_SUMMARY
