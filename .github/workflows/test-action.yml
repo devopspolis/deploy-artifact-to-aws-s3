@@ -37,7 +37,30 @@ jobs:
                       sys.exit(1)
               
               # Check input count (GitHub Actions limit is 10)
-              input_count = content.count('  artifact:') + content.count('  path:') + content.count('  bucket:') + content.count('  aws-region:') + content.count('  extract-artifact:') + content.count('  delete:') + content.count('  tags:') + content.count('  script:') + content.count('  working-directory:') + content.count('  role:')
+              # Count inputs by parsing sections properly
+              lines = content.split('\n')
+              in_inputs_section = False
+              in_outputs_section = False
+              input_count = 0
+              
+              for line in lines:
+                  stripped = line.strip()
+                  if stripped == 'inputs:':
+                      in_inputs_section = True
+                      in_outputs_section = False
+                      continue
+                  elif stripped == 'outputs:':
+                      in_inputs_section = False  
+                      in_outputs_section = True
+                      continue
+                  elif stripped == 'runs:':
+                      in_inputs_section = False
+                      in_outputs_section = False
+                      continue
+                  
+                  # Count input definitions (start with 2 spaces, end with colon, no more spaces)
+                  if in_inputs_section and line.startswith('  ') and not line.startswith('    ') and line.endswith(':'):
+                      input_count += 1
               
               if input_count > 10:
                   print(f'❌ Too many inputs: {input_count}/10 (GitHub Actions limit)')
